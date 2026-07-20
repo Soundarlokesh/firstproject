@@ -4,6 +4,3 @@ __pycache__/
 .env
 vectorstore/*.faiss
 vectorstore/*.pkl
-data/documents/*
-!data/documents/placeholder_memory.txt
-!data/documents/README_PLACEHOLDER.txt
