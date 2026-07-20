@@ -27,6 +27,22 @@ app.add_middleware(
 app.mount("/media", StaticFiles(directory=str(settings.images_path)), name="media")
 
 
+@app.on_event("startup")
+def build_index_on_startup():
+    """Render's free tier spins the container down after ~15 min idle and
+    spins up a FRESH one on the next request — the ephemeral disk (including
+    any index built by a manual /documents/reindex call) is gone. Rebuilding
+    here means every cold start regenerates the index from whatever's
+    actually committed to the repo, with zero manual steps required."""
+    try:
+        count = rag.build_index()
+        print(f"[startup] index built automatically: {count} chunks")
+    except Exception as e:
+        # Don't crash the whole app if this fails (e.g. embedding model can't
+        # download yet) — /chat will still report a clear error if so.
+        print(f"[startup] index build failed, will need manual /documents/reindex: {e}")
+
+
 class ChatRequest(BaseModel):
     question: str
 
@@ -108,6 +124,33 @@ async def upload_image(file: UploadFile = File(...), caption: str = Form(...)):
         )
 
     return {"saved": file.filename, "caption": caption.strip(), "chunks_indexed": chunk_count}
+
+
+@app.delete("/images/{filename}")
+def delete_image(filename: str):
+    """Removes the image file AND its caption entry, then reindexes so the
+    now-deleted photo can't still show up in chat (same rebuild-required gotcha
+    as text documents — deleting the file alone wouldn't touch the index)."""
+    removed_caption = rag.remove_caption(filename)
+
+    image_path = settings.images_path / filename
+    removed_file = image_path.exists()
+    if removed_file:
+        image_path.unlink()
+
+    if not removed_caption and not removed_file:
+        raise HTTPException(status_code=404, detail=f"No image or caption found for '{filename}'")
+
+    try:
+        chunk_count = rag.build_index()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Deleted but reindexing failed: {e}")
+
+    return {
+        "deleted_file": removed_file,
+        "deleted_caption": removed_caption,
+        "chunks_indexed": chunk_count,
+    }
 
 
 @app.post("/documents/reindex")
